@@ -29,6 +29,7 @@ struct Derived {
     has_dispatched: bool,
     last_activity: Option<u64>,
     last_prompt_state: Option<String>,
+    last_prompt_error: Option<String>,
     model: Option<String>,
     storage_warned: bool,
     recovery_attempted: bool,
@@ -44,6 +45,7 @@ impl Derived {
             has_dispatched: s.has_dispatched,
             last_activity: s.last_activity,
             last_prompt_state: s.last_prompt_state.clone(),
+            last_prompt_error: s.last_prompt_error.clone(),
             model: s.model.clone(),
             storage_warned: s.storage_warned,
             recovery_attempted: s.recovery_attempted,
@@ -58,6 +60,7 @@ impl Derived {
         s.has_dispatched = self.has_dispatched;
         s.last_activity = self.last_activity;
         s.last_prompt_state = self.last_prompt_state;
+        s.last_prompt_error = self.last_prompt_error;
         s.model = self.model;
         s.storage_warned = self.storage_warned;
         s.recovery_attempted = self.recovery_attempted;
@@ -350,6 +353,7 @@ impl Local {
                     if !matches!(receipt.state.as_str(), "accepted" | "running" | "delivered") {
                         session.queue.retain(|id| id != &receipt.request_id);
                         session.last_prompt_state = Some(receipt.state.clone());
+                        session.last_prompt_error = receipt.error.clone();
                     }
                     if matches!(receipt.state.as_str(), "completed" | "interrupted") {
                         session.recovery_attempted = false; // Healthy progress permits a later recovery.

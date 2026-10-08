@@ -137,10 +137,11 @@ impl Manager {
 }
 
 /// Harnesses a cloud agent may start as a child thread; the app has no Cloud thread type for the others.
-const CHILD_HARNESSES: [runtime::Kind; 3] = [
+const CHILD_HARNESSES: [runtime::Kind; 4] = [
     runtime::Kind::Codex,
     runtime::Kind::Claude,
     runtime::Kind::Pi,
+    runtime::Kind::OpenCode,
 ];
 const FINISHED: [&str; 5] = [
     "completed",
@@ -227,7 +228,13 @@ fn title(session: &Session) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn notice(child: &str, title: Option<String>, state: &str, reply: Option<String>) -> String {
+fn notice(
+    child: &str,
+    title: Option<String>,
+    state: &str,
+    error: Option<String>,
+    reply: Option<String>,
+) -> String {
     let name = title.map_or(child.to_owned(), |t| format!("\"{t}\" ({child})"));
     match state {
         "completed" => {
@@ -248,9 +255,19 @@ fn notice(child: &str, title: Option<String>, state: &str, reply: Option<String>
         "interrupted" => format!(
             "[Cloudroom] Child thread {name} was interrupted. If the user stopped it, do not restart or replace its work unless they ask."
         ),
-        _ => format!(
-            "[Cloudroom] Child thread {name} failed or its outcome is uncertain. Check it with `cloudroom thread output {child}` before deciding next steps."
-        ),
+        _ => {
+            let cause = error.map_or(String::new(), |e| {
+                let oom = if e.contains("signal 9") {
+                    " Signal 9 usually means the sandbox ran out of memory."
+                } else {
+                    ""
+                };
+                format!(" Cause: {}.{oom} Its turn did not finish; resend the task if it still matters.", e.trim())
+            });
+            format!(
+                "[Cloudroom] Child thread {name} failed or its outcome is uncertain.{cause} Check it with `cloudroom thread output {child}` before deciding next steps."
+            )
+        }
     }
 }
 
@@ -274,7 +291,7 @@ impl Manager {
             let kind = spawn.harness.unwrap_or(p.harness);
             if !CHILD_HARNESSES.contains(&kind) {
                 return Err(Error::Conflict(
-                    "child threads support codex, claude-code and pi",
+                    "child threads support codex, claude-code, pi and opencode",
                 ));
             }
             let same = kind == p.harness;
@@ -537,6 +554,7 @@ impl Manager {
                             p.session_id.clone(),
                             r.request_id.clone(),
                             r.state.clone(),
+                            r.error.clone(),
                             c.replies
                                 .iter()
                                 .find(|(id, _)| *id == r.request_id)
@@ -548,8 +566,8 @@ impl Manager {
                         None => None,
                     }
                 };
-                if let Some((parent, request, state, reply, title, target)) = due {
-                    let text = notice(&child, title, &state, reply);
+                if let Some((parent, request, state, error, reply, title, target)) = due {
+                    let text = notice(&child, title, &state, error, reply);
                     let (steer, queued) = notice_ids(&child, &request);
                     // A turn that just ended, or a harness that cannot steer, falls back to the queue.
                     // Storage or a drain can refuse both; retry after a pause, or after the next restart.
@@ -598,7 +616,7 @@ impl Manager {
                 .filter(|c| only.map_or(archived || !c.archived, |id| c.session_id == id))
                 .map(|c| {
                     let busy = c.current_request.is_some() || c.has_work();
-                    json!({"id":c.session_id,"title":title(c),"harness":c.harness,"model":c.model,"state":c.state,"busy":busy,"error":c.failure,"archived":c.archived})
+                    json!({"id":c.session_id,"title":title(c),"harness":c.harness,"model":c.model,"state":c.state,"busy":busy,"error":c.failure.clone().or_else(|| c.last_prompt_error.clone()),"archived":c.archived})
                 })
                 .collect();
             let child = only.and_then(|id| local.sessions.get(id));

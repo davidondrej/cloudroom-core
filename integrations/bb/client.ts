@@ -580,7 +580,7 @@ export class CloudroomClient {
     extra: { content?: Json; attachments?: Json; service_tier?: string } = {},
   ) {
     if ((!prompt.trim() && extra.attachments === undefined) || new TextEncoder().encode(prompt).length > 32768) {
-      throw new CloudroomError("Prompt must contain 1–32768 bytes of text");
+      throw new CloudroomError("Prompt must contain 1–32768 bytes of text", 400);
     }
     return this.#command(
       `${sessionPath(sessionId)}/prompts`,
@@ -639,7 +639,7 @@ export class CloudroomClient {
 
   steer(sessionId: string, id: string, targetRequestId: string, text: string) {
     if (!text.trim() || new TextEncoder().encode(text).length > 32768) {
-      throw new CloudroomError("Prompt must contain 1–32768 bytes of text");
+      throw new CloudroomError("Prompt must contain 1–32768 bytes of text", 400);
     }
     return this.#command(
       `${sessionPath(sessionId)}/steer`,

@@ -117,6 +117,8 @@ pub struct Session {
     #[serde(skip)]
     last_prompt_state: Option<String>,
     #[serde(skip)]
+    last_prompt_error: Option<String>,
+    #[serde(skip)]
     model: Option<String>,
     #[serde(skip)]
     storage_warned: bool,
@@ -2155,8 +2157,13 @@ impl Manager {
                     })
                     .map(|r| r.request_id.clone())
                     .collect();
+                let lost = failed.clone().unwrap_or_else(|| match &cause {
+                    Some(cause) => format!("{reason}: {cause} ({exit})"),
+                    None => format!("{reason} ({exit})"),
+                });
                 if let Some(request) = request {
-                    local.finish_receipt(
+                    // Keep the cause on the lost turn: an automatic recovery leaves the thread idle and error-free.
+                    local.finish_receipt_with(
                         id,
                         &request,
                         if self.is_stopping() || close.is_some() {
@@ -2164,6 +2171,7 @@ impl Manager {
                         } else {
                             "unknown_after_restart"
                         },
+                        (!expected).then(|| lost.clone()),
                     )?;
                 }
                 for request in interrupts {
@@ -2172,10 +2180,6 @@ impl Manager {
                 if cleaned_up {
                     local.append(id, "harness", json!({"pid":null}), None)?;
                 }
-                let lost = failed.clone().unwrap_or_else(|| match &cause {
-                    Some(cause) => format!("{reason}: {cause} ({exit})"),
-                    None => format!("{reason} ({exit})"),
-                });
                 let state = if expected && close.is_some() {
                     "closed"
                 } else if resumable && (self.is_stopping() || recover) {

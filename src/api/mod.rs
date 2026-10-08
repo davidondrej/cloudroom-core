@@ -786,6 +786,7 @@ async fn start(
     Json(body): Json<Start>,
 ) -> Result<impl IntoResponse> {
     key(&body.request_id)?;
+    manager.mac.expect();
     if body.provider.as_ref().is_some_and(|p| {
         p.is_empty()
             || p.chars()

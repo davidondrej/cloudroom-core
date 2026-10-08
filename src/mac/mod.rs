@@ -40,7 +40,7 @@ const BODY: usize = 5 * LIMIT;
 /// A connected helper must confirm each job quickly; a sleeping Mac must not hang agents.
 const ACK: Duration = Duration::from_secs(10);
 const KEEP: Duration = Duration::from_secs(3600);
-/// A new sandbox's helper needs a few seconds to find and pair with it, so early calls wait for it.
+/// The helper needs a few seconds to find a new thread's sandbox or reconnect after a wake, so early calls wait for it.
 const FRESH: Duration = Duration::from_secs(60);
 const ATTACH: Duration = Duration::from_secs(30);
 const UNAVAILABLE: &str = "Mac unavailable: the paired Mac is offline, asleep, or has Mac access turned off. Continue cloud work and try again later.";
@@ -100,7 +100,7 @@ pub struct Mac {
     helper: Mutex<Option<Helper>>,
     changed: watch::Sender<u64>,
     next: AtomicU64,
-    started: Instant,
+    since: Mutex<Instant>,
 }
 impl Default for Mac {
     fn default() -> Self {
@@ -109,11 +109,15 @@ impl Default for Mac {
             helper: Mutex::default(),
             changed: watch::channel(0).0,
             next: AtomicU64::new(0),
-            started: Instant::now(),
+            since: Mutex::new(Instant::now()),
         }
     }
 }
 impl Mac {
+    /// A new thread or a dropped helper reopens the short wait for the Mac.
+    pub(crate) fn expect(&self) {
+        *self.since.lock().unwrap() = Instant::now();
+    }
     fn touch(&self) {
         self.changed.send_modify(|n| *n += 1);
     }
@@ -233,6 +237,7 @@ async fn stream(
         let mut helper = mac.mac.helper.lock().unwrap();
         if helper.as_ref().is_some_and(|h| h.generation == generation) {
             *helper = None;
+            mac.mac.expect();
         }
         drop(helper);
         mac.mac.touch();
@@ -320,7 +325,7 @@ async fn local_run(
     validate(&run)?;
     let mac = &m.mac;
     let mut changed = mac.changed.subscribe();
-    let fresh = mac.started.elapsed() < FRESH;
+    let fresh = mac.since.lock().unwrap().elapsed() < FRESH;
     let wait = Instant::now() + if fresh { ATTACH } else { Duration::ZERO };
     let (generation, device, events) = loop {
         if let Some(h) = mac.helper.lock().unwrap().as_ref() {

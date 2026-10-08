@@ -19,7 +19,7 @@ const USAGE: &str = "cloudroom thread update --self --title TITLE
 cloudroom thread update --self --reasoning-level LEVEL
 cloudroom thread archive --self
 cloudroom thread stop --self
-cloudroom thread spawn --provider codex|claude-code|pi [--model MODEL] [--reasoning-level LEVEL] [--title TITLE] --prompt TEXT|--prompt-file PATH
+cloudroom thread spawn --provider codex|claude-code|pi|opencode [--model MODEL] [--reasoning-level LEVEL] [--title TITLE] --prompt TEXT|--prompt-file PATH
 cloudroom thread list [--include-archived]
 cloudroom thread output CHILD_ID
 cloudroom thread tell CHILD_ID TEXT
@@ -193,7 +193,7 @@ async fn spawn(
         .provider
         .map(|p| {
             serde_json::from_value(json!(p))
-                .map_err(|_| bad("Use --provider codex, claude-code or pi"))
+                .map_err(|_| bad("Use --provider codex, claude-code, pi or opencode"))
         })
         .transpose()?;
     let key = match input.request_id {
