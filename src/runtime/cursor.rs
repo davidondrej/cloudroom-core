@@ -28,6 +28,10 @@ pub(super) struct Flavor {
     pub capture: bool,
     /// Diagnostics the agent sends as message text; never part of the reply.
     pub notices: &'static [&'static str],
+    /// Records the history an agent replays on `session/load`. The agent already keeps it.
+    pub replay: bool,
+    /// Says why the agent ended a turn early, as Local threads do.
+    pub explain_stops: bool,
 }
 pub(super) const CURSOR: Flavor = Flavor {
     harness: "cursor",
@@ -36,6 +40,8 @@ pub(super) const CURSOR: Flavor = Flavor {
     valid_id,
     capture: true,
     notices: &[],
+    replay: true,
+    explain_stops: false,
 };
 
 pub(crate) fn capabilities(kind: Kind) -> Value {
@@ -63,6 +69,19 @@ pub(super) async fn start(handle: &Handle) -> io::Result<String> {
 }
 
 pub(super) async fn open(handle: &Handle, name: &str) -> io::Result<(String, Value)> {
+    initialize(handle, name).await?;
+    let mut params = json!({"cwd":handle.repository,"mcpServers":[]});
+    let method = if let Some(saved) = &handle.resume {
+        params["sessionId"] = json!(saved.id);
+        "session/load"
+    } else {
+        "session/new"
+    };
+    attach(handle, name, method, params).await
+}
+
+/// Returns the agent's capabilities and keeps them on the handle.
+pub(super) async fn initialize(handle: &Handle, name: &str) -> io::Result<Value> {
     let init = handle
         .call(
             "initialize",
@@ -76,13 +95,18 @@ pub(super) async fn open(handle: &Handle, name: &str) -> io::Result<(String, Val
             "{name} ACP session loading is unavailable"
         )));
     }
-    let mut params = json!({"cwd":handle.repository,"mcpServers":[]});
-    let method = if let Some(saved) = &handle.resume {
-        params["sessionId"] = json!(saved.id);
-        "session/load"
-    } else {
-        "session/new"
-    };
+    let capabilities = init["agentCapabilities"].clone();
+    *handle.acp.lock().unwrap() = capabilities.clone();
+    Ok(capabilities)
+}
+
+/// Creates, loads, or resumes the session and checks it is the saved one.
+pub(super) async fn attach(
+    handle: &Handle,
+    name: &str,
+    method: &str,
+    params: Value,
+) -> io::Result<(String, Value)> {
     let session = handle.call(method, params).await?;
     let id = handle.native()?;
     if handle.resume.as_ref().is_some_and(|saved| saved.id != id) {
@@ -142,6 +166,26 @@ pub(super) async fn send(handle: &Handle, request: &str, input: &Value) -> io::R
             )
             .await?;
     }
+    prompt(handle, request, input, false).await
+}
+
+/// Cloudroom's rules for the agent: plain-chat questions and the Cloudroom system prompt.
+pub(super) fn instructions(handle: &Handle) -> String {
+    match &handle.system_prompt {
+        Some(system_prompt) => {
+            format!("{PLAIN_CHAT}\n\n[Cloudroom system prompt]\n{system_prompt}")
+        }
+        None => PLAIN_CHAT.to_owned(),
+    }
+}
+
+/// Sends one turn. Agents that do not keep the instructions for the session get them with every prompt.
+pub(super) async fn prompt(
+    handle: &Handle,
+    request: &str,
+    input: &Value,
+    instructed: bool,
+) -> io::Result<()> {
     let mut text = input["text"].as_str().unwrap_or_default().to_owned();
     if let Some(attachments) = input["attachments"].as_array() {
         for attachment in attachments {
@@ -150,15 +194,14 @@ pub(super) async fn send(handle: &Handle, request: &str, input: &Value) -> io::R
             }
         }
     }
+    if !instructed {
+        text = format!("{}\n\n{text}", instructions(handle));
+    }
     handle
         .process
         .dispatch(
             "session/prompt",
-            json!({"sessionId":handle.native()?,
-        "prompt":[{"type":"text","text":match &handle.system_prompt {
-            Some(system_prompt) => format!("{PLAIN_CHAT}\n\n[Cloudroom system prompt]\n{system_prompt}\n\n{text}"),
-            None => format!("{PLAIN_CHAT}\n\n{text}"),
-        }}]}),
+            json!({"sessionId":handle.native()?,"prompt":[{"type":"text","text":text}]}),
             Some(request),
             None,
         )
@@ -274,12 +317,14 @@ pub(super) struct Protocol {
     prompt: Option<u64>,
     cancel: Option<u64>,
     restart: Option<(u64, Value)>,
+    /// Steering prompts the agent joins to the running turn; each is answered when that turn ends.
+    steering: Vec<u64>,
     acknowledgement: Option<(Value, u64)>,
     responses: Vec<Value>,
     closing: bool,
     tools: BTreeMap<String, Value>,
     capture: Capture,
-    terminal: Option<(String, String)>,
+    terminal: Option<(String, String, Option<String>)>,
     message: u64,
     text: String,
     thinking: String,
@@ -299,6 +344,7 @@ impl Protocol {
             prompt: None,
             cancel: None,
             restart: None,
+            steering: Vec::new(),
             acknowledgement: None,
             responses: Vec::new(),
             closing: false,
@@ -332,8 +378,10 @@ impl Protocol {
 }
 impl Adapter for Protocol {
     fn validate(&self, method: &str, _: &Value) -> io::Result<()> {
-        if matches!(method, "cloudroom/steer" | "session/cancel")
-            && (self.prompt.is_none() || self.restart.is_some() || self.cancel.is_some())
+        if matches!(
+            method,
+            "cloudroom/steer" | "cloudroom/join" | "session/cancel"
+        ) && (self.prompt.is_none() || self.restart.is_some() || self.cancel.is_some())
         {
             return Err(invalid(&format!(
                 "{} turn has ended or an interrupt is already pending",
@@ -343,11 +391,15 @@ impl Adapter for Protocol {
         Ok(())
     }
     fn encode(&mut self, id: u64, method: &str, params: Value, request: Option<&str>) -> Value {
-        if matches!(method, "session/new" | "session/load") {
+        if matches!(method, "session/new" | "session/load" | "session/resume") {
             self.opening = Some(id);
         }
         if request.is_some() {
             self.prompt = Some(id);
+        }
+        if method == "cloudroom/join" {
+            self.steering.push(id);
+            return json!({"jsonrpc":"2.0","id":id,"method":"session/prompt","params":params});
         }
         if method == "cloudroom/steer" {
             self.restart = Some((id, params.clone()));
@@ -367,6 +419,16 @@ impl Adapter for Protocol {
     ) -> io::Result<Vec<Event>> {
         self.responses.clear();
         self.acknowledgement = None;
+        if !self.flavor.replay && self.opening.is_some() && value["method"] == "session/update" {
+            return Ok(Vec::new());
+        }
+        if value.get("method").is_none()
+            && let Some(at) = value["id"]
+                .as_u64()
+                .and_then(|id| self.steering.iter().position(|joined| *joined == id))
+        {
+            self.steering.remove(at);
+        }
         let mut events = Vec::new();
         if value.get("method").is_none()
             && value["id"].as_u64() == self.opening
@@ -544,8 +606,15 @@ impl Adapter for Protocol {
                 );
                 self.acknowledgement = Some((value["id"].clone(), id));
                 self.prompt = Some(id);
+            } else if value.get("error").is_none()
+                && stop == Some("end_turn")
+                && !self.steering.is_empty()
+            {
+                // A steer that came in as the turn ended runs as the next turn; this turn waits for it.
+                self.prompt = Some(self.steering.remove(0));
             } else {
                 self.prompt = None;
+                self.steering.clear();
                 if let Some(id) = self
                     .cancel
                     .take()
@@ -558,10 +627,21 @@ impl Adapter for Protocol {
                     Some("cancelled") => "interrupted",
                     _ => "failed",
                 };
+                let error = (self.flavor.explain_stops && status == "failed").then(|| {
+                    match (stop, value["error"]["message"].as_str()) {
+                        (Some(stop), _) => format!("{} stopped the turn: {stop}", self.flavor.name),
+                        (None, Some(message)) => {
+                            format!("{} failed the turn: {message}", self.flavor.name)
+                        }
+                        (None, None) => {
+                            format!("{} ended the turn without a reason", self.flavor.name)
+                        }
+                    }
+                });
                 if let Some(request) = state.request.clone() {
                     events.extend(state.started());
                     state.finished = true;
-                    self.terminal = Some((request, status.into()));
+                    self.terminal = Some((request, status.into(), error));
                 }
             }
         }
@@ -614,12 +694,12 @@ impl Adapter for Protocol {
     fn capture(&mut self) -> io::Result<Vec<Event>> {
         let mut events = self.capture.poll()?;
         if !self.capture.pending()
-            && let Some((request, status)) = self.terminal.take()
+            && let Some((request, status, error)) = self.terminal.take()
         {
             events.push(Event::Finished {
                 request,
                 status,
-                error: None,
+                error,
             });
         }
         Ok(events)

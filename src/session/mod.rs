@@ -1198,6 +1198,7 @@ impl Manager {
                 ));
             }
             let target = session.current_request.clone();
+            let deliver_now = deliver_now && !self.sleep_for_login(&mut local, id);
             let receipt = Receipt {
                 request_id: request.clone(),
                 command: command.into(),

@@ -165,6 +165,22 @@ impl Manager {
         }
     }
 
+    /// Claude reads its login only at start, so after a new sign-in an idle agent sleeps
+    /// before its next prompt; the queued prompt wakes it with the new login.
+    pub(super) fn sleep_for_login(&self, local: &mut Local, id: &str) -> bool {
+        let session = &local.sessions[id];
+        let changed = session.can_resume()
+            && local.can_sleep(id)
+            && session
+                .handle
+                .as_ref()
+                .is_some_and(|h| h.login_changed(&self.config));
+        if changed {
+            self.release(local, id);
+        }
+        changed
+    }
+
     /// Archive asks for sleep. It applies once any running turn or interrupt settles.
     pub(super) fn request_sleep(
         self: &Arc<Self>,

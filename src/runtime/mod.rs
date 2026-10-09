@@ -331,11 +331,15 @@ pub struct Handle {
     context_file: Option<PathBuf>,
     reasoning: Option<String>,
     baseline: Arc<Mutex<Option<String>>>,
+    /// ACP agent capabilities from `initialize`; empty for other harnesses.
+    acp: Arc<Mutex<Value>>,
     rpc_timeout: Duration,
     command_guard_enabled: bool,
     strip_ai_co_authors: bool,
     system_prompt: Option<String>,
     controls: Arc<tokio::sync::Mutex<()>>,
+    /// Claude's login when it started; it reads the login only then.
+    login: Option<u64>,
 }
 impl Handle {
     pub fn spawn(
@@ -427,6 +431,8 @@ impl Handle {
             }
         }
         let file_identity = config.storage.as_ref().map(|p| (p.agent_uid, p.agent_gid));
+        // Read before the command does, so a login saved in between causes a restart, never a miss.
+        let login = matches!(kind, Kind::Claude).then(|| claude::login(config));
         let (command, adapter, session_file, context_file): (_, Box<dyn Adapter>, _, _) = match kind
         {
             Kind::Claude => {
@@ -529,11 +535,13 @@ impl Handle {
                 file_identity,
                 reasoning: resume.as_ref().and_then(|saved| saved.reasoning.clone()),
                 baseline: Arc::new(Mutex::new(None)),
+                acp: Arc::new(Mutex::new(Value::Null)),
                 rpc_timeout: config.rpc_timeout,
                 command_guard_enabled,
                 strip_ai_co_authors,
                 system_prompt,
                 controls: Arc::new(tokio::sync::Mutex::new(())),
+                login,
                 resume,
                 session_file,
                 context_file,
@@ -554,6 +562,11 @@ impl Handle {
 
     pub fn pid(&self) -> u32 {
         self.process.pid()
+    }
+    /// A new Claude sign-in or API key was saved after this agent started.
+    pub fn login_changed(&self, config: &Config) -> bool {
+        self.login
+            .is_some_and(|login| login != claude::login(config))
     }
     pub fn process_count(&self) -> Option<usize> {
         self.process.process_count()
@@ -630,9 +643,10 @@ impl Handle {
             Kind::Codex => codex::send(self, request, input).await.map(|()| Vec::new()),
             Kind::Pi => pi::send(self, request, input).await.map(|()| Vec::new()),
             Kind::Claude => claude::send(self, request, input).await,
-            Kind::Cursor | Kind::Fx | Kind::OpenCode => cursor::send(self, request, input)
+            Kind::Cursor | Kind::OpenCode => cursor::send(self, request, input)
                 .await
                 .map(|()| Vec::new()),
+            Kind::Fx => fx::send(self, request, input).await.map(|()| Vec::new()),
         }
     }
     pub async fn steer(&self, request: &str, text: &str) -> io::Result<()> {
@@ -647,7 +661,8 @@ impl Handle {
             Kind::Codex => codex::steer(self, state, text).await,
             Kind::Pi => pi::steer(self, request, text).await,
             Kind::Claude => claude::steer(self, request, text).await,
-            Kind::Cursor | Kind::Fx | Kind::OpenCode => cursor::steer(self, request, text).await,
+            Kind::Cursor | Kind::OpenCode => cursor::steer(self, request, text).await,
+            Kind::Fx => fx::steer(self, request, text).await,
         }
     }
     pub async fn compact(&self) -> io::Result<()> {
@@ -746,7 +761,9 @@ impl Handle {
     }
     pub async fn usage(&self) -> io::Result<Option<Value>> {
         match self.kind {
-            Kind::Codex => Ok(None),
+            // A Codex turn interrupted before its first model reply reports no usage.
+            Kind::Codex => Ok(Some(self.process.progress.borrow().last_usage.clone())
+                .filter(|usage| !usage.is_null())),
             Kind::Pi => pi::usage(self).await,
             Kind::Claude => Ok(Some(self.process.progress.borrow().last_usage.clone())),
             Kind::Cursor | Kind::Fx | Kind::OpenCode => Ok(None),

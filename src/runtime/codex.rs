@@ -222,7 +222,8 @@ pub(super) async fn compact(handle: &Handle) -> io::Result<()> {
 }
 
 pub(super) async fn rewind(handle: &Handle, input: &Value) -> io::Result<Value> {
-    let mut params = json!({"threadId":handle.native()?});
+    // Without these, the fork falls back to Codex's own sandbox, which cannot run in Cloud sandboxes.
+    let mut params = json!({"threadId":handle.native()?,"approvalPolicy":"never","sandbox":"danger-full-access"});
     if let Some(system_prompt) = &handle.system_prompt {
         params["developerInstructions"] = json!(system_prompt);
     }
@@ -529,6 +530,11 @@ impl Adapter for Protocol {
                         events.extend(state.started());
                     }
                 }
+            }
+            "thread/tokenUsage/updated" => {
+                let usage = &params["tokenUsage"];
+                let (total, last) = (&usage["total"], &usage["last"]);
+                state.last_usage = json!({"contextUsage":{"tokens":last["totalTokens"],"contextWindow":usage["modelContextWindow"]},"tokens":{"input":total["inputTokens"],"output":total["outputTokens"],"cacheRead":total["cachedInputTokens"],"cacheWrite":total["cacheWriteInputTokens"],"total":total["totalTokens"]},"lastUsage":{"input":last["inputTokens"],"output":last["outputTokens"],"cacheRead":last["cachedInputTokens"],"cacheWrite":last["cacheWriteInputTokens"],"totalTokens":last["totalTokens"]}});
             }
             "item/started" => {
                 if params["item"]["type"] == "commandExecution"

@@ -180,12 +180,34 @@ fn fork_of(session: &Session) -> Option<&str> {
     start.input["fork"]["session"].as_str()
 }
 
+/// Whether `child` was started by `ancestor` or by a thread under it.
+fn under(local: &Local, ancestor: &str, child: &Session) -> bool {
+    let mut parent = child.parent_session.as_deref();
+    // Bounded, in case saved history ever holds a parent loop.
+    for _ in 0..local.sessions.len() {
+        match parent {
+            Some(p) if p == ancestor => return true,
+            Some(p) => {
+                parent = local
+                    .sessions
+                    .get(p)
+                    .and_then(|s| s.parent_session.as_deref())
+            }
+            None => return false,
+        }
+    }
+    false
+}
+
+/// Any thread above a child may use it, so no grandchild outlives the threads above it.
 /// A side chat may use the child threads of the thread it was forked from, like its own.
 fn may_use(local: &Local, caller: &str, child: &Session) -> bool {
-    let Some(parent) = child.parent_session.as_deref() else {
-        return false;
-    };
-    parent == caller || local.sessions.get(caller).and_then(fork_of) == Some(parent)
+    under(local, caller, child)
+        || local
+            .sessions
+            .get(caller)
+            .and_then(fork_of)
+            .is_some_and(|source| under(local, source, child))
 }
 
 /// The latest saved history of a side chat's source, read as the side chat launches.
@@ -595,13 +617,24 @@ impl Manager {
         });
     }
 
-    /// The caller's own child, for `cloudroom thread output|tell`.
+    /// The caller's own child or a child under it, for `cloudroom thread output|tell|stop|archive`.
     pub(crate) fn own_child(&self, parent: &str, child: &str) -> Result<()> {
         let local = self.local.lock().unwrap();
         match local.sessions.get(child) {
             Some(c) if may_use(&local, parent, c) => Ok(()),
             _ => Err(Error::Conflict("not a child thread of this thread")),
         }
+    }
+
+    /// Every thread under this one, at any depth, with whether it is already archived.
+    pub(crate) fn descendants(&self, id: &str) -> Vec<(String, bool)> {
+        let local = self.local.lock().unwrap();
+        local
+            .sessions
+            .values()
+            .filter(|c| under(&local, id, c))
+            .map(|c| (c.session_id.clone(), c.archived))
+            .collect()
     }
 
     /// The caller's children, or one child with its latest reply: live when idle, else its last completed one.
@@ -616,7 +649,7 @@ impl Manager {
                 .filter(|c| only.map_or(archived || !c.archived, |id| c.session_id == id))
                 .map(|c| {
                     let busy = c.current_request.is_some() || c.has_work();
-                    json!({"id":c.session_id,"title":title(c),"harness":c.harness,"model":c.model,"state":c.state,"busy":busy,"error":c.failure.clone().or_else(|| c.last_prompt_error.clone()),"archived":c.archived})
+                    json!({"id":c.session_id,"title":title(c),"harness":c.harness,"model":c.model,"state":c.state,"busy":busy,"error":c.failure.clone().or_else(|| c.last_prompt_error.clone()),"archived":c.archived,"parent":c.parent_session})
                 })
                 .collect();
             let child = only.and_then(|id| local.sessions.get(id));

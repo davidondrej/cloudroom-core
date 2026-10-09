@@ -143,7 +143,22 @@ async fn archive(
     ConnectInfo(peer): ConnectInfo<Peer>,
 ) -> Result<Json<Value>, Failure> {
     let session = caller(&m, peer, "thread")?;
+    archive_under(&m, &session)?;
     record(&m, &session, "archive", json!({"archived":true}))
+}
+
+/// Stops and archives every thread under `id` now: the app archives them too, but never stops them,
+/// and it may be offline. An archived thread is stopped again, in case it still runs.
+fn archive_under(m: &Arc<Manager>, id: &str) -> Result<(), Failure> {
+    for (child, archived) in m.descendants(id) {
+        let request =
+            random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
+        let _ = m.command(&child, request, "stop", json!({}));
+        if !archived {
+            let _ = record(m, &child, "archive", json!({"id":child,"archived":true}))?;
+        }
+    }
+    Ok(())
 }
 
 fn session_failure(error: super::Error) -> Failure {
@@ -292,7 +307,7 @@ async fn stop_child(
     Ok(Json(json!({"id":id,"state":receipt.state})))
 }
 
-/// Stops the child now; the app archives it, and its own children, whenever it next reads the thread.
+/// Stops the child and every thread under it now; the app archives them whenever it next reads the thread.
 async fn archive_child(
     State(m): State<Arc<Manager>>,
     ConnectInfo(peer): ConnectInfo<Peer>,
@@ -302,8 +317,9 @@ async fn archive_child(
     m.own_child(&parent, &id).map_err(session_failure)?;
     let request =
         random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
-    // A child that already ended has nothing to stop.
+    // A child that already ended has nothing to stop. Stop it first, so it starts no new children.
     let _ = m.command(&id, request, "stop", json!({}));
+    archive_under(&m, &id)?;
     record(&m, &id, "archive", json!({"id":id,"archived":true}))
 }
 

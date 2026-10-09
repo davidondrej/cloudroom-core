@@ -112,6 +112,15 @@ pub(super) fn key_path(config: &Config) -> PathBuf {
     config.state_dir.join("claude-api-key")
 }
 
+/// Fingerprint of the login files `profile_env` reads, so a running agent can tell its login changed.
+pub(super) fn login(config: &Config) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    fs::read(key_path(config)).ok().hash(&mut hasher);
+    fs::read(token_path(config)).ok().hash(&mut hasher);
+    hasher.finish()
+}
+
 pub(super) fn profile_env(command: &mut Command, config: &Config, profile: &HarnessConfig) {
     // Setting this even to ~/.claude relocates ~/.claude.json and hides native user settings.
     if profile.home != config.account_home.join(".claude") {

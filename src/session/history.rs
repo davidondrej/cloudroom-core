@@ -56,12 +56,13 @@ impl History {
     pub async fn upload(&self, records: &[Record]) -> Result<(), sqlx::Error> {
         let texts = records
             .iter()
-            .map(serde_json::to_string)
+            .map(for_database)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| sqlx::Error::Decode(e.into()))?;
         let sessions: Vec<&str> = records.iter().map(|r| r.session_id.as_str()).collect();
         let sequences: Vec<i64> = records.iter().map(|r| r.sequence as i64).collect();
-        // A lost commit reply may cause retransmission. Only identical content is a retry.
+        // A lost commit reply may cause retransmission. Only identical content is a retry, or the
+        // same row an older Core saved with its native line (a retry across an upgrade).
         // Insert-only, so the database login never needs permission to change history.
         // The final SELECT sees rows from before this statement, so rows it inserted are excluded by `added`.
         let conflicts: i64 = sqlx::query_scalar(
@@ -72,7 +73,8 @@ impl History {
              SELECT count(*) FROM incoming i \
              WHERE NOT EXISTS (SELECT 1 FROM added a WHERE a.session_id=i.session_id AND a.sequence=i.sequence) \
                AND NOT EXISTS (SELECT 1 FROM cloudroom_records r WHERE r.store=$1 AND r.session_id=i.session_id \
-                 AND r.sequence=i.sequence AND r.record=i.record)")
+                 AND r.sequence=i.sequence AND (r.record=i.record \
+                   OR starts_with(r.record, left(i.record, -1) || ',\"native\":')))")
             .bind(&self.store).bind(&sessions).bind(&sequences).bind(&texts)
             .fetch_one(&self.pool).await?;
         if conflicts > 0 {
@@ -157,5 +159,66 @@ impl History {
                     .map_err(|e| sqlx::Error::Decode(e.into()))
             })
             .collect()
+    }
+}
+
+/// What the database keeps of a record (ADR 0203). The sandbox's journal keeps every native line, but the
+/// database drops those nobody reads from it: copied session-file lines (the harness's own file stays on disk),
+/// and Claude's raw output, which Core already turns into the records the app shows. Codex and Pi keep theirs.
+fn for_database(record: &Record) -> serde_json::Result<String> {
+    if record.native.is_none()
+        || (record.kind != "native_record" && record.data["harness"] != "claude-code")
+    {
+        return serde_json::to_string(record);
+    }
+    serde_json::to_string(&Record {
+        native: None,
+        ..record.clone()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn database_drops_unread_native_lines_and_still_matches_older_rows() {
+        let record = |kind: &str, data, native: &str| Record {
+            sequence: 7,
+            session_id: "cr_a".into(),
+            kind: kind.into(),
+            timestamp_ms: Some(1),
+            data,
+            native: Some(native.into()),
+        };
+        let claude = record(
+            "text_delta",
+            json!({"harness":"claude-code","delta":"hi"}),
+            r#"{"type":"stream_event"}"#,
+        );
+        let file = record(
+            "native_record",
+            json!({"offset":0}),
+            "{\"type\":\"user\"}\n",
+        );
+        let codex = record(
+            "text_delta",
+            json!({"method":"item/agentMessage/delta"}),
+            "{}",
+        );
+        for kept in [&claude, &file] {
+            let (full, saved) = (
+                serde_json::to_string(kept).unwrap(),
+                for_database(kept).unwrap(),
+            );
+            assert!(!saved.contains("\"native\""));
+            // The upload's retry check depends on this: an older Core's row is this one plus its native line.
+            assert!(full.starts_with(&format!("{},\"native\":", &saved[..saved.len() - 1])));
+        }
+        assert_eq!(
+            for_database(&codex).unwrap(),
+            serde_json::to_string(&codex).unwrap()
+        );
     }
 }
