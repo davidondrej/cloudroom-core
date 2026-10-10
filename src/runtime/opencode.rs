@@ -13,7 +13,7 @@ pub(super) const OPENCODE: cursor::Flavor = cursor::Flavor {
     capture: false,
     notices: &[],
     replay: true,
-    explain_stops: false,
+    explain_stops: true,
 };
 const DATABASE: &str = "opencode.db";
 /// Cloudroom levels for OpenCode; each model offers its own subset of efforts.
@@ -101,7 +101,13 @@ pub(super) async fn start(handle: &Handle) -> io::Result<String> {
         .and_then(|reasoning| efforts(reasoning).into_iter().find(|e| offered.contains(e)))
         && cursor::option_value(&session, "effort") != Some(effort)
     {
-        set(handle, &id, "effort", effort).await?;
+        // OpenCode can reply before the effort applies, so like Local threads, don't require a confirmation.
+        handle
+            .call(
+                "session/set_config_option",
+                json!({"sessionId":id,"configId":"effort","value":effort}),
+            )
+            .await?;
     }
     Ok(id)
 }

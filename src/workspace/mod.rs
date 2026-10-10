@@ -1,3 +1,4 @@
+pub mod files;
 pub mod storage;
 
 use axum::body::Body;

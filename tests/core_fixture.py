@@ -53,7 +53,7 @@ def codex():
                 if mode in ('offline', 'unauthorized'):
                     send({'id': message['id'], 'error': {'code': -1, 'message': '401 Unauthorized' if mode == 'unauthorized' else 'Network unavailable'}})
                     continue
-                result = {'rateLimits': {'primary': {'usedPercent': 100 if mode == 'limited' else 0}, 'secondary': None}}
+                result = {'rateLimits': {'primary': {'usedPercent': 100 if mode in ('limited', 'credits') else 0}, 'secondary': None, 'credits': {'hasCredits': mode == 'credits', 'unlimited': False}}}
             elif method == 'account/login/start':
                 login_id = 'fixture-login'
                 with Path('auth-attempts').open('a') as file: file.write('login\n')
@@ -286,7 +286,7 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual((self.repo / (native + '.requests')).read_text().splitlines(), ['once'])
 
     def test_codex_account_failure_and_limits_are_not_confused_with_login(self):
-        for mode, expected in [('offline', 'unavailable'), ('unauthorized', 'missing'), ('limited', 'limited')]:
+        for mode, expected in [('offline', 'unavailable'), ('unauthorized', 'missing'), ('limited', 'limited'), ('credits', 'connected')]:
             with self.subTest(mode=mode):
                 (self.repo / 'auth-state').write_text(mode)
                 self.start()
@@ -811,6 +811,26 @@ class RecoveryTests(unittest.TestCase):
         self.service.request("POST", "/v1/sessions/cr_child_kid/prompts", {"request_id": "again", "text": "hello"}, 202)
         self.wait(lambda: receipts().get("notice_cr_child_kid_again", {}).get("state") == "completed", "queued notice")
         self.assertNotIn("notice_cr_child_kid_again_steer", receipts())
+
+    def test_parent_hears_nothing_of_a_turn_cut_by_restart_or_a_detached_child(self):
+        self.seed(); self.start(); self.ready()
+        self.service.request("POST", "/v1/sessions", {"request_id": "kid", "parent_session": "cr_seed", "prompt": "hold"}, 202)
+        child = lambda: self.service.session("cr_child_kid")
+        receipts = lambda: self.status()["receipts"]
+        self.wait(lambda: child()["state"] == "running", "running child")
+        self.service.stop(); self.start(); self.ready()
+        self.wait(lambda: child()["state"] == "idle", "resumed child")
+        self.assertIn(child()["receipts"]["task_kid"]["state"], ["unknown", "unknown_after_restart"])
+        self.service.request("POST", "/v1/sessions/cr_child_kid/prompts", {"request_id": "first", "text": "hello"}, 202)
+        self.wait(lambda: "notice_cr_child_kid_first" in receipts(), "notice for a turn after the restart")
+        time.sleep(.5)
+        self.assertNotIn("notice_cr_child_kid_task_kid", receipts())
+        self.wait(lambda: self.status()["state"] == "idle", "parent idle again")
+        self.service.request("POST", "/v1/sessions/cr_child_kid/detach", {}, 202)
+        self.service.request("POST", "/v1/sessions/cr_child_kid/prompts", {"request_id": "again", "text": "hello"}, 202)
+        self.wait(lambda: child()["receipts"]["again"]["state"] == "completed", "detached child turn")
+        time.sleep(.5)
+        self.assertNotIn("notice_cr_child_kid_again", receipts())
 
     def test_codex_goal_turns_are_tracked_paused_by_stop_and_resumed_by_the_user(self):
         self.seed(); self.start(); self.ready()

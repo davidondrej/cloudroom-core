@@ -742,6 +742,11 @@ export class CloudroomClient {
     return this.#command(`${sessionPath(sessionId)}/sleep`, "sleep", { request_id: id }, sessionId);
   }
 
+  /** Makes a child session top-level, so its parent hears no more about it. */
+  async detach(sessionId: string): Promise<void> {
+    await this.#json(`${sessionPath(sessionId)}/detach`, {});
+  }
+
   /** Answers an agent's secret request. `null` cancels it. */
   async answerSecret(sessionId: string, id: string, values: Record<string, string> | null): Promise<void> {
     await this.#json(`${sessionPath(sessionId)}/secrets/${encodeURIComponent(id)}`, values ? { values } : {});

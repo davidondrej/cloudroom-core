@@ -284,7 +284,7 @@ fn notice(
                 } else {
                     ""
                 };
-                format!(" Cause: {}.{oom} Its turn did not finish; resend the task if it still matters.", e.trim())
+                format!(" Cause: {}.{oom} Its turn did not finish; resend the task if it still matters.", e.trim().trim_end_matches('.'))
             });
             format!(
                 "[Cloudroom] Child thread {name} failed or its outcome is uncertain.{cause} Check it with `cloudroom thread output {child}` before deciding next steps."
@@ -409,7 +409,7 @@ impl Manager {
                 json!({"id":id,"harness":kind,"title":receipt.input["title"]}),
                 None,
             )?;
-            self.watch_child(&local, id.clone());
+            self.watch_child(&local, id.clone(), Vec::new());
         }
         let (manager, child) = (self.clone(), id.clone());
         tokio::spawn(async move {
@@ -520,7 +520,8 @@ impl Manager {
         Ok((id, receipt))
     }
 
-    /// Resumes parent notices for spawned children after a restart.
+    /// Resumes parent notices for spawned children after a restart. Turns the restart cut off are
+    /// not reported: the parent stopped too, and the app decides what runs next.
     pub(super) fn watch_children(self: &Arc<Self>, local: &Local) {
         for child in local.sessions.values() {
             if child
@@ -528,14 +529,30 @@ impl Manager {
                 .values()
                 .any(|r| r.command == "start" && r.input["notify"] == true)
             {
-                self.watch_child(local, child.session_id.clone());
+                let cut = child
+                    .receipts
+                    .values()
+                    .filter(|r| matches!(r.state.as_str(), "unknown" | "unknown_after_restart"))
+                    .map(|r| r.request_id.clone())
+                    .collect();
+                self.watch_child(local, child.session_id.clone(), cut);
             }
         }
     }
 
+    /// Makes a child a top-level thread, so its parent hears no more about it (docs/scopes/sandboxes.md).
+    pub(crate) fn detach(&self, id: &str) -> Result<()> {
+        let mut local = self.local.lock().unwrap();
+        let session = local.sessions.get(id).ok_or(Error::NotFound)?;
+        if session.parent_session.is_some() {
+            local.append(id, "detach", json!({}), None)?;
+        }
+        Ok(())
+    }
+
     /// Tells the parent about each finished child turn, until either thread closes. A busy parent
     /// gets the notice in its running turn, as in Local threads; otherwise it waits in the queue.
-    fn watch_child(self: &Arc<Self>, local: &Local, child: String) {
+    fn watch_child(self: &Arc<Self>, local: &Local, child: String, cut: Vec<String>) {
         let manager = self.clone();
         let mut changed = local.changed.subscribe();
         tokio::spawn(async move {
@@ -556,7 +573,10 @@ impl Manager {
                         return;
                     }
                     let finished = c.receipts.values().find_map(|r| {
-                        if r.command != "prompt" || !FINISHED.contains(&r.state.as_str()) {
+                        if r.command != "prompt"
+                            || !FINISHED.contains(&r.state.as_str())
+                            || cut.contains(&r.request_id)
+                        {
                             return None;
                         }
                         let (steer, queued) = notice_ids(&child, &r.request_id);

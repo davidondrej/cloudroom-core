@@ -363,12 +363,16 @@ impl Protocol {
             native: None,
         }
     }
-    fn finish_message(&mut self, state: &Progress, events: &mut Vec<Event>) {
+    fn finish_message(&mut self, state: &mut Progress, events: &mut Vec<Event>) {
         for (kind, text) in [
             ("agentMessage", std::mem::take(&mut self.text)),
             ("reasoning", std::mem::take(&mut self.thinking)),
         ] {
             if !text.is_empty() {
+                if kind == "agentMessage" {
+                    // The turn's latest message is a child's reply, as for the other harnesses.
+                    state.last_text.clone_from(&text);
+                }
                 events.push(self.record("item_completed", json!({"harness":self.flavor.harness,"request_id":state.request,
                     "item_id":format!("{}:{}:{}", self.flavor.harness, self.message, kind),"item_type":kind,"text":text})));
             }

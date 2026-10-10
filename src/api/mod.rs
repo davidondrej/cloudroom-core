@@ -91,6 +91,7 @@ pub fn router(manager: Arc<Manager>, token: String) -> Router {
         .route("/v1/sessions/{id}/interrupt", post(interrupt))
         .route("/v1/sessions/{id}/stop", post(stop))
         .route("/v1/sessions/{id}/sleep", post(sleep))
+        .route("/v1/sessions/{id}/detach", post(detach))
         .route("/v1/sessions/{id}/resume", post(resume))
         .route("/v1/sessions/{id}/close", post(close))
         .route("/v1/sessions/{id}/events", get(events))
@@ -776,6 +777,14 @@ async fn sleep(
     key(&body.request_id)?;
     let receipt = manager.command(&id, body.request_id, "sleep", json!({}))?;
     Ok(accepted(&manager, &id, receipt))
+}
+
+async fn detach(
+    State(manager): State<Arc<Manager>>,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<Value>)> {
+    manager.detach(&id)?;
+    Ok((StatusCode::ACCEPTED, Json(json!({"detached":true}))))
 }
 
 async fn health(State(manager): State<Arc<Manager>>) -> Json<Value> {

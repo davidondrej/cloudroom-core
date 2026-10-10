@@ -232,11 +232,15 @@ impl Rpc {
         let limit = limits
             .get("rateLimits")
             .ok_or_else(|| io::Error::other("Missing live account limits"))?;
-        let exhausted = ["primary", "secondary"].iter().any(|key| {
-            limit[*key]["usedPercent"]
-                .as_f64()
-                .is_some_and(|n| n >= 100.0)
-        });
+        // Purchased credits keep Codex working past the plan limit.
+        let credits = &limit["credits"];
+        let exhausted = credits["hasCredits"] != true
+            && credits["unlimited"] != true
+            && ["primary", "secondary"].iter().any(|key| {
+                limit[*key]["usedPercent"]
+                    .as_f64()
+                    .is_some_and(|n| n >= 100.0)
+            });
         let mut status = Status::new(
             if exhausted { "limited" } else { "connected" },
             if exhausted {

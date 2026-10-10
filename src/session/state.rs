@@ -281,9 +281,13 @@ impl Local {
         match record.kind.as_str() {
             "receipt" => {
                 let receipt = serde_json::from_value::<Receipt>(record.data.clone())?;
-                if receipt.command == "start" {
+                // Only its first record sets the parent, so a later copy cannot undo a detach.
+                if receipt.command == "start" && !session.receipts.contains_key(&receipt.request_id)
+                {
                     session.parent_session =
                         receipt.input["parent_session"].as_str().map(str::to_owned);
+                }
+                if receipt.command == "start" {
                     if session.parent_session.is_some()
                         && receipt.state == "accepted"
                         && !session.receipts.contains_key(&receipt.request_id)
@@ -522,6 +526,7 @@ impl Local {
                 session.state = "idle".into();
             }
             "archive" => session.archived = true,
+            "detach" => session.parent_session = None,
             "usage_limited" => session.usage_limited = true,
             "storage_warning" => session.storage_warned = true,
             "storage_pause" => session.storage_paused = record.data["paused"] == true,
