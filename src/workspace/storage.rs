@@ -67,24 +67,27 @@ impl Policy {
     }
 
     /// A container without cgroups or capabilities, whose agents have sudo: Core runs as the agent account and
-    /// contains work by marking its processes (runtime/linux.rs). Its /var/tmp may be a memory disk.
+    /// contains work by marking its processes (runtime/linux.rs). Its /tmp and /var/tmp may be memory disks
+    /// (gVisor mounts its own tmpfs on /tmp).
     pub fn container(&self) -> bool {
         self.cgroup_root.is_none()
     }
 
     fn check_filesystems(&self, config: &Config) -> io::Result<()> {
         let mount = fs::metadata(&config.repository)?;
-        let var_tmp = (!self.container()).then_some(Path::new("/var/tmp"));
+        let temporary = (!self.container())
+            .then_some([Path::new("/tmp"), Path::new("/var/tmp")])
+            .into_iter()
+            .flatten();
         for path in [
             &config.repository,
             &config.state_dir,
             &config.account_home,
             &self.cache_dir,
-            Path::new("/tmp"),
             Path::new("/code"),
         ]
         .into_iter()
-        .chain(var_tmp)
+        .chain(temporary)
         .chain(
             config
                 .harnesses
@@ -114,7 +117,10 @@ impl Policy {
             .cache_dir
             .parent()
             .ok_or_else(|| io::Error::other("invalid cache root"))?;
-        for part in parent.ancestors() {
+        // In a container Core already runs as the agent, so agent-owned ancestors protect nothing, as with
+        // history above. There the cache may live inside the agent's /code volume, which some sandboxes (gVisor)
+        // require: each mount gets its own device, and agent paths must share one.
+        for part in parent.ancestors().filter(|_| !self.container()) {
             let m = fs::symlink_metadata(part)?;
             if m.file_type().is_symlink() || m.uid() == self.agent_uid || m.mode() & 0o022 != 0 {
                 return Err(io::Error::other("cache root requires protected ancestors"));
