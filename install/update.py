@@ -33,6 +33,10 @@ TAG = 'cloudroom-core-update'
 QUIET_MS = 10 * 60_000  # Restart only after 10 minutes without session activity.
 RETRY_SECONDS = 15 * 60
 IDLE = ('idle', 'sleeping', 'closed', 'process_lost', 'failed', 'saved_history_only')
+HARNESS_NAMES = (
+    'codex', 'codex-code-mode', 'pi', 'cursor-agent', 'claude',
+    'fx', 'opencode', 'opencode.exe', 'hermes', 'devin', 'openclaw',
+)
 
 
 def run(*args, timeout=300, **kwargs):
@@ -134,7 +138,7 @@ def busy(values):
             # Idle harness processes are expected; shells and other tools mean active work.
             harness = (exe.startswith(('/usr/local/lib/cloudroom/', '/usr/local/lib/node_modules/@anthropic-ai/',
                                        '/srv/cloudroom/agent/.local/share/claude/versions/', '/opt/ascii-agent/'))
-                       or Path(exe).name in ('codex', 'codex-code-mode')
+                       or Path(exe).name in HARNESS_NAMES
                        or any(a.endswith(b'/codex.js') for a in args[1:3]))
             if not harness and not mcp_server(pid):
                 return 'running tool ' + Path(exe).name
